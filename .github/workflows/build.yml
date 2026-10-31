@@ -1,0 +1,345 @@
+
+name: Build LiteOS Nano APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Get source
+        uses: actions/checkout@v4
+
+      - name: Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install SDK
+        run: sdkmanager "platforms;android-35" "build-tools;35.0.0"
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 8.9
+
+      - name: Create LiteOS project
+        run: |
+          mkdir -p app/src/main/java/com/liteos/launcher
+
+          cat > settings.gradle.kts <<'EOF'
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          rootProject.name = "LiteOS-Nano"
+          include(":app")
+          EOF
+
+          cat > build.gradle.kts <<'EOF'
+          plugins {
+              id("com.android.application") version "8.7.3" apply false
+              id("org.jetbrains.kotlin.android") version "2.0.21" apply false
+          }
+          EOF
+
+          cat > app/build.gradle.kts <<'EOF'
+          plugins {
+              id("com.android.application")
+              id("org.jetbrains.kotlin.android")
+          }
+
+          android {
+              namespace = "com.liteos.launcher"
+              compileSdk = 35
+
+              defaultConfig {
+                  applicationId = "com.liteos.launcher"
+                  minSdk = 29
+                  targetSdk = 29
+                  versionCode = 1
+                  versionName = "1.0"
+              }
+
+              compileOptions {
+                  sourceCompatibility = JavaVersion.VERSION_17
+                  targetCompatibility = JavaVersion.VERSION_17
+              }
+
+              kotlinOptions {
+                  jvmTarget = "17"
+              }
+          }
+          EOF
+
+          cat > app/src/main/AndroidManifest.xml <<'EOF'
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <queries>
+                  <intent>
+                      <action android:name="android.intent.action.MAIN"/>
+                      <category android:name="android.intent.category.LAUNCHER"/>
+                  </intent>
+              </queries>
+              <application
+                  android:label="LiteOS Nano"
+                  android:theme="@android:style/Theme.Material.NoActionBar"
+                  android:allowBackup="false">
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN"/>
+                          <category android:name="android.intent.category.HOME"/>
+                          <category android:name="android.intent.category.DEFAULT"/>
+                      </intent-filter>
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN"/>
+                          <category android:name="android.intent.category.LAUNCHER"/>
+                      </intent-filter>
+                  </activity>
+              </application>
+          </manifest>
+          EOF
+
+          cat > app/src/main/java/com/liteos/launcher/MainActivity.kt <<'EOF'
+          package com.liteos.launcher
+
+          import android.app.Activity
+          import android.os.Bundle
+          import android.content.Intent
+          import android.graphics.Color
+          import android.view.Gravity
+          import android.view.View
+          import android.view.ViewGroup
+          import android.widget.*
+          import android.content.pm.ResolveInfo
+          import android.text.TextWatcher
+          import android.text.Editable
+
+          class MainActivity : Activity() {
+
+              private val bg = Color.rgb(15, 19, 23)
+              private val fg = Color.WHITE
+              private val apps = mutableListOf<ResolveInfo>()
+              private val favorites = mutableSetOf<String>()
+              private lateinit var adapter: AppAdapter
+              private lateinit var search: EditText
+              private var filter = ""
+
+              private fun dp(v: Int) =
+                  (v * resources.displayMetrics.density).toInt()
+
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+
+                  window.statusBarColor = bg
+                  window.navigationBarColor = bg
+
+                  favorites.addAll(
+                      getSharedPreferences("liteos", 0)
+                          .getStringSet("favorites", emptySet())
+                          ?: emptySet()
+                  )
+
+                  val root = LinearLayout(this).apply {
+                      orientation = LinearLayout.VERTICAL
+                      setPadding(dp(20), dp(25), dp(20), dp(8))
+                      setBackgroundColor(bg)
+                  }
+
+                  val logo = TextView(this).apply {
+                      text = "LiteOS"
+                      textSize = 24f
+                      setTextColor(fg)
+                      gravity = Gravity.CENTER
+                  }
+
+                  val clock = TextClock(this).apply {
+                      format24Hour = "HH:mm"
+                      textSize = 52f
+                      setTextColor(fg)
+                      gravity = Gravity.CENTER
+                      setPadding(0, dp(25), 0, dp(5))
+                  }
+
+                  val date = TextClock(this).apply {
+                      format24Hour = "dd.MM.yyyy"
+                      textSize = 13f
+                      setTextColor(Color.LTGRAY)
+                      gravity = Gravity.CENTER
+                      setPadding(0, 0, 0, dp(25))
+                  }
+
+                  search = EditText(this).apply {
+                      hint = "Поиск приложений"
+                      setSingleLine(true)
+                      textSize = 15f
+                      setTextColor(fg)
+                      setHintTextColor(Color.GRAY)
+                      setPadding(dp(14), 0, dp(14), 0)
+                      setBackgroundColor(Color.rgb(30, 38, 45))
+                  }
+
+                  val list = ListView(this).apply {
+                      divider = null
+                      dividerHeight = 0
+                      setBackgroundColor(bg)
+                  }
+
+                  adapter = AppAdapter()
+                  list.adapter = adapter
+
+                  list.setOnItemClickListener { _, _, pos, _ ->
+                      openApp(adapter.getItem(pos))
+                  }
+
+                  list.setOnItemLongClickListener { _, _, pos, _ ->
+                      toggleFavorite(adapter.getItem(pos))
+                      true
+                  }
+
+                  root.addView(logo)
+                  root.addView(clock)
+                  root.addView(date)
+                  root.addView(search,
+                      LinearLayout.LayoutParams(-1, dp(48)))
+                  root.addView(list,
+                      LinearLayout.LayoutParams(-1, 0, 1f))
+
+                  setContentView(root)
+
+                  search.addTextChangedListener(object : TextWatcher {
+                      override fun beforeTextChanged(
+                          s: CharSequence?, start: Int,
+                          count: Int, after: Int
+                      ) {}
+
+                      override fun onTextChanged(
+                          s: CharSequence?, start: Int,
+                          before: Int, count: Int
+                      ) {
+                          filter = s.toString()
+                          adapter.refresh()
+                      }
+
+                      override fun afterTextChanged(s: Editable?) {}
+                  })
+
+                  loadApps()
+              }
+
+              private fun loadApps() {
+                  val intent = Intent(Intent.ACTION_MAIN).apply {
+                      addCategory(Intent.CATEGORY_LAUNCHER)
+                  }
+
+                  apps.clear()
+                  apps.addAll(
+                      packageManager.queryIntentActivities(intent, 0)
+                  )
+                  apps.sortBy {
+                      it.loadLabel(packageManager).toString().lowercase()
+                  }
+                  adapter.refresh()
+              }
+
+              private fun toggleFavorite(app: ResolveInfo) {
+                  val key = app.activityInfo.packageName
+                  if (!favorites.add(key)) favorites.remove(key)
+
+                  getSharedPreferences("liteos", 0).edit()
+                      .putStringSet("favorites", favorites.toSet())
+                      .apply()
+
+                  adapter.refresh()
+              }
+
+              private fun openApp(app: ResolveInfo) {
+                  val intent = packageManager.getLaunchIntentForPackage(
+                      app.activityInfo.packageName
+                  )
+                  if (intent != null) startActivity(intent)
+              }
+
+              private inner class AppAdapter : BaseAdapter() {
+                  private val shown = mutableListOf<ResolveInfo>()
+
+                  fun refresh() {
+                      shown.clear()
+                      shown.addAll(apps.filter {
+                          it.loadLabel(packageManager).toString()
+                              .contains(filter, true)
+                      }.sortedWith(
+                          compareByDescending<ResolveInfo> {
+                              favorites.contains(it.activityInfo.packageName)
+                          }.thenBy {
+                              it.loadLabel(packageManager).toString().lowercase()
+                          }
+                      ))
+                      notifyDataSetChanged()
+                  }
+
+                  override fun getCount() = shown.size
+                  override fun getItem(position: Int) = shown[position]
+                  override fun getItemId(position: Int) = position.toLong()
+
+                  override fun getView(
+                      position: Int,
+                      convertView: View?,
+                      parent: ViewGroup
+                  ): View {
+                      val app = getItem(position)
+                      val row = (convertView as? TextView)
+                          ?: TextView(this@MainActivity)
+
+                      val key = app.activityInfo.packageName
+                      row.text =
+                          (if (favorites.contains(key)) "★  " else "") +
+                          app.loadLabel(packageManager)
+
+                      row.textSize = 16f
+                      row.setTextColor(fg)
+                      row.gravity = Gravity.CENTER_VERTICAL
+                      row.setPadding(dp(12), dp(10), dp(12), dp(10))
+
+                      val icon = app.loadIcon(packageManager)
+                      icon.setBounds(0, 0, dp(30), dp(30))
+                      row.setCompoundDrawables(icon, null, null, null)
+                      row.compoundDrawablePadding = dp(16)
+
+                      return row
+                  }
+              }
+          }
+          EOF
+
+      - name: Build APK
+        run: gradle --no-daemon assembleDebug
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: LiteOS-Nano-APK
+          path: app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
